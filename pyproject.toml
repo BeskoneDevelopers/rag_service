@@ -1,0 +1,23 @@
+[project]
+name = "rag-service"
+version = "0.1.0"
+description = "RAG сервис на FastAPI"
+readme="README.md"
+dependencies = [
+    "fastapi==0.162.7",
+    "uvicorn==0.54.0",
+    "pydantic-settings==2.16.3",
+    "celery[redis]==5.7.0",
+    "sqlalchemy[asyncio]==2.1.8",
+    "asyncpg==0.32.0",
+    "alembic==1.20.1",
+    "pgvector==0.5.1"
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app", "app.*"]
