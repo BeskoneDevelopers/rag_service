@@ -5,8 +5,12 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+    volumes:
+      - "documents_data:/app/uploads"
+
     env_file:
       - .env
+
     depends_on:
       db:
         condition: service_healthy
@@ -55,6 +59,9 @@ services:
 
     command: celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
 
+    volumes:
+      - "documents_data:/app/uploads"
+
     env_file:
       - .env
 
@@ -68,3 +75,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  documents_data:

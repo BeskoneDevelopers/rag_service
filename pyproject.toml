@@ -10,8 +10,13 @@ dependencies = [
     "celery[redis]==5.7.0",
     "sqlalchemy[asyncio]==2.1.8",
     "asyncpg==0.32.0",
+    "psycopg[binary]==3.3.9",
     "alembic==1.20.1",
-    "pgvector==0.5.1"
+    "pgvector==0.5.1",
+    "aiofiles==25.1.0",
+    "python-multipart==0.0.33",
+    "python-docx==1.2.0",
+    "pymupdf==2.1"
 ]
 
 [build-system]
