@@ -1,25 +1,34 @@
-from app.celery_app import celery_app
 from celery.utils.log import get_task_logger
-from app.worker_db import sessionlocal
+
+from app.celery_app import celery_app
+from app.chunker import chunk_blocks
 from app.models import Document
 from app.parser import parser_document
-
+from app.worker_db import sessionlocal
 
 logger = get_task_logger(__name__)
+
 
 @celery_app.task()
 def process_document(document_id: int):
 
     with sessionlocal() as session:
-        logger.info(f"Взят документ {document_id}")
         document = session.get(Document, document_id)
 
         if document is None:
             raise ValueError(f"Документ {document_id} не найден")
 
-        logger.info(f"Найден документ {document.file_path}")
+        try:
+            filepath = document.file_path
+            document.status = "processing"
+            session.commit()
+            blocks = parser_document(filepath)
+            chunk_blocks(blocks)
 
-        blocks = parser_document(document.file_path)
-        logger.info(f"Колл абзацев {len(blocks)}")
+        except Exception:
+            session.rollback()
+            document.status = "failed"
+            session.commit()
+            raise
 
     return {"processed": document_id}

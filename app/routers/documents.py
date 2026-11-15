@@ -1,24 +1,27 @@
-from fastapi import UploadFile, File, Form, APIRouter, HTTPException, Depends
-from pathlib import Path
 import hashlib
+from pathlib import Path
 from uuid import uuid4
-import aiofiles
-from aiofiles import os
 
-from app.models import Document
+import aiofiles
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database import get_session
+from app.models import Document
 from app.tasks import process_document
 
+router = APIRouter(prefix="/documents", tags=["file_process"])
+
+FORMATS = {".pdf", ".docx", ".md"}
 
 
-router = APIRouter(prefix="/documents",tags=["file_process"])
-
-FORMATS = {".pdf", ".docx", ".doc", ".md"}
-
-@router.post("")
-async def load_file(company: str = Form(...), file: UploadFile = File(...), session: AsyncSession = Depends(get_session)):
+@router.post("", status_code=202)
+async def load_file(
+    company: str = Form(...),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+):
     if file.filename is None:
         raise HTTPException(detail="Файл не внесен", status_code=422)
 
@@ -44,8 +47,7 @@ async def load_file(company: str = Form(...), file: UploadFile = File(...), sess
 
     content_hash = hasher.hexdigest()
     stmt = select(Document).where(
-        Document.company == company.strip(),
-        Document.content_hash == content_hash
+        Document.company == company.strip(), Document.content_hash == content_hash
     )
 
     result = await session.execute(stmt)
@@ -64,14 +66,25 @@ async def load_file(company: str = Form(...), file: UploadFile = File(...), sess
         company=company.strip(),
         file_path=str(path),
         content_hash=content_hash,
-        status="pending"
+        status="pending",
     )
     session.add(document)
     await session.commit()
     process_document.delay(document.id)
 
+    return {"id": document.id, "status": document.status, "duplicate": False}
+
+
+@router.get("/{document_id}")
+async def get_document_by_id(document_id: int, session: AsyncSession = Depends(get_session)):
+    document = await session.get(Document, document_id)
+
+    if document is None:
+        raise HTTPException(detail="Документ не найден", status_code=404)
+
     return {
         "id": document.id,
+        "filename": document.filename,
+        "company": document.company,
         "status": document.status,
-        "duplicate": False
     }
