@@ -14,4 +14,7 @@ RUN useradd -m appuser
 
 USER appuser
 
+RUN mkdir -p /app/model_cache \
+    && chown appuser:appuser /app/model_cache
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -7,6 +7,7 @@ services:
 
     volumes:
       - "documents_data:/app/uploads"
+      - "./alembic:/app/alembic"
 
     env_file:
       - .env
@@ -57,13 +58,18 @@ services:
   worker:
     build: .
 
-    command: celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=1
 
     volumes:
+      - ./app:/app/app
       - "documents_data:/app/uploads"
+      - "model_cache:/app/model_cache"
 
     env_file:
       - .env
+
+    environment:
+      HF_HOME: /app/model_cache
 
     depends_on:
       db:
@@ -76,3 +82,4 @@ volumes:
   postgres_data:
   redis_data:
   documents_data:
+  model_cache:

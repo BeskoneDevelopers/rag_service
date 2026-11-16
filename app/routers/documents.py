@@ -3,6 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import aiofiles
+import aiofiles.os
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
