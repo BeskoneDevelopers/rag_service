@@ -1,0 +1,10 @@
+model,company,question,top_k,status,sources,ttft_ms,llm_ttft_ms,prompt_tokens,completion_tokens
+qwen3:1.7b,ZX Bank,What awards did ZX Bank Ltd. win in 2023?,2,ok,2,240.4,106.4,516,91
+qwen3:1.7b,ZX Bank,What awards did ZX Bank Ltd. win in 2023?,3,ok,3,226.5,119.7,777,92
+qwen3:1.7b,ZX Bank,What awards did ZX Bank Ltd. win in 2023?,5,ok,5,383.2,220.8,1422,97
+qwen3:1.7b,ZX Bank,Why was ZX Bank recognized for its digital initiatives in 2023?,2,ok,2,832.5,218.8,700,95
+qwen3:1.7b,ZX Bank,Why was ZX Bank recognized for its digital initiatives in 2023?,3,ok,3,201.6,84.8,860,81
+qwen3:1.7b,ZX Bank,Why was ZX Bank recognized for its digital initiatives in 2023?,5,ok,5,367.4,223.3,1379,81
+qwen3:1.7b,ZX Bank,Why might ZX Bank consider Phuentsholing an important location for establishing a bank branch?,2,ok,2,840.7,318.3,989,98
+qwen3:1.7b,ZX Bank,Why might ZX Bank consider Phuentsholing an important location for establishing a bank branch?,3,ok,3,343.7,163.7,1376,77
+qwen3:1.7b,ZX Bank,Why might ZX Bank consider Phuentsholing an important location for establishing a bank branch?,5,ok,5,433.4,290.6,2057,107

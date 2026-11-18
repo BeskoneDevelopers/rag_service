@@ -1,10 +1,14 @@
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
-from sentence_transformers import SentenceTransformer
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 
 @lru_cache(maxsize=1)
-def get_model() -> SentenceTransformer:
+def get_model() -> "SentenceTransformer":
+    from sentence_transformers import SentenceTransformer
+
     model = SentenceTransformer("BAAI/bge-m3", device="cpu")
     return model
 
