@@ -275,7 +275,8 @@ async def test_stream_disconnect_closes_generation(app, redis, monkeypatch, phas
         await app(scope, receive, send)
 
     assert redis.owner() is None
-    if phase == "token":
+    if phase in ("headers", "token"):
         assert closed.is_set()
+        assert started.is_set()
     else:
         assert not started.is_set()

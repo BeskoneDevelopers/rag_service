@@ -48,5 +48,5 @@ async def ask_rag(company: str, question: str, top_k: int = 5) -> dict:
     async with llm_generation_lock():
         result = await generate_answer(prompt)
     if has_invalid_citation(result, len(retrieve["sources"])):
-        raise LLMServiceError("Ответ Ollama содержит ссылку на неизвестный источник")
+        raise LLMServiceError("Ответ llama-server содержит ссылку на неизвестный источник")
     return {"answer": result, "sources": retrieve["sources"]}

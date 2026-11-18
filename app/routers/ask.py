@@ -70,6 +70,11 @@ class LLMStreamingResponse(StreamingResponse):
             try:
                 async with llm_generation_lock():
                     try:
+                        # A failed connection must produce HTTP 503, not a 200 SSE error.
+                        try:
+                            first_token = await anext(self.tokens)
+                        except StopAsyncIteration as exc:
+                            raise LLMServiceError("Модель вернула пустой ответ") from exc
                         await send_or_disconnect(
                             {
                                 "type": "http.response.start",
@@ -78,7 +83,12 @@ class LLMStreamingResponse(StreamingResponse):
                             }
                         )
                         started = True
-                        async for token in self.tokens:
+                        async def all_tokens():
+                            yield first_token
+                            async for subsequent in self.tokens:
+                                yield subsequent
+
+                        async for token in all_tokens():
                             answer_parts.append(token)
                             await send_or_disconnect(
                                 {
@@ -91,7 +101,7 @@ class LLMStreamingResponse(StreamingResponse):
                         with CancelScope(shield=True):
                             await self.tokens.aclose()
                 if has_invalid_citation("".join(answer_parts), len(self.sources)):
-                    raise LLMServiceError("Ответ Ollama содержит ссылку на неизвестный источник")
+                    raise LLMServiceError("Ответ llama-server содержит ссылку на неизвестный источник")
                 terminal_body = make_sse("sources", self.sources).encode(self.charset)
             except ClientDisconnect:
                 return
@@ -103,7 +113,10 @@ class LLMStreamingResponse(StreamingResponse):
                 LLMServiceError,
             ) as exc:
                 if not started:
-                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                    status = 504 if isinstance(exc, LLMTimeoutError) else (
+                        502 if isinstance(exc, LLMServiceError) else 503
+                    )
+                    raise HTTPException(status_code=status, detail=str(exc)) from exc
                 terminal_body = make_sse("error", {"detail": str(exc)}).encode(self.charset)
             except Exception as exc:
                 logger.exception("Unexpected error while streaming an LLM answer")

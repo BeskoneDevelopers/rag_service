@@ -5,7 +5,7 @@ import sys
 from contextlib import aclosing
 from time import perf_counter
 
-from app.llm_client import OLLAMA_MODEL, GenerationUsage, stream_answer
+from app.llm_client import GenerationUsage, model_name, stream_answer
 from app.llm_lock import llm_generation_lock
 from app.prompts import build_prompt, has_invalid_citation
 from app.rag_pipeline import retrieve_context
@@ -77,7 +77,7 @@ async def run(company: str, questions: list[str], warmup: bool) -> None:
             result = await measure(company, question, top_k)
             writer.writerow(
                 {
-                    "model": OLLAMA_MODEL,
+                    "model": model_name(),
                     "company": company,
                     "question": question,
                     "top_k": top_k,

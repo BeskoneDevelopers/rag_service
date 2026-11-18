@@ -1,6 +1,7 @@
 import json
 from contextlib import asynccontextmanager
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -14,10 +15,16 @@ from app.routers import ask
 pytestmark = pytest.mark.anyio
 QUESTION = {"company": "test", "question": "Вопрос?"}
 SOURCES = [{"document_id": 1}]
-FIRST_CHUNK = b'{"response":"first","done":false}\n'
+FIRST_CHUNK = b'data: {"choices":[{"delta":{"content":"first"},"finish_reason":null}]}\n\n'
+LAST_CHUNK = (
+    b'data: {"choices":[{"delta":{"content":" last"},"finish_reason":"stop"}]}\n\n'
+    b'data: {"choices":[],"usage":{"prompt_tokens":32,"completion_tokens":5}}\n\n'
+    b'data: [DONE]\n\n'
+)
+SUCCESS = {"choices": [{"message": {"content": "first last"}, "finish_reason": "stop"}]}
 
 
-class OllamaBody(httpx.AsyncByteStream):
+class LlamaBody(httpx.AsyncByteStream):
     def __init__(self, *parts):
         self.parts = parts
         self.closed = False
@@ -50,15 +57,21 @@ async def api(monkeypatch, anyio_backend):
     for module in (ask, rag_pipeline):
         monkeypatch.setattr(module, "retrieve_context", AsyncMock(return_value=retrieved))
         monkeypatch.setattr(module, "llm_generation_lock", generation_lock)
-    async with AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         yield client
 
 
 @pytest.fixture
-def mock_ollama(monkeypatch):
-    monkeypatch.setenv("OLLAMA_URL", "http://ollama.test/api/generate")
+def mock_llama(monkeypatch):
+    monkeypatch.setattr(
+        llm_client,
+        "_settings",
+        lambda: SimpleNamespace(
+            llm_chat_url="http://llama.test/v1/chat/completions",
+            llm_model="qwen3.5-2b",
+            llm_timeout_seconds=30,
+        ),
+    )
 
     def install(*replies):
         requests = []
@@ -90,26 +103,22 @@ def read_events(response):
     return events
 
 
-def check_error(response, path, status, detail):
-    if path == "/ask/stream":
-        assert read_events(response) == [("error", {"detail": detail})]
-    else:
-        assert response.status_code == status
-        assert response.json() == {"detail": detail}
+def check_error(response, status, detail):
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
 
 
 @pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
-async def test_retries_transport_drop_before_answer(api, mock_ollama, path):
+async def test_retries_transport_drop_before_answer(api, mock_llama, path):
     streaming = path.endswith("/stream")
-    broken = OllamaBody(httpx.ReadError("connection reset"))
-    if streaming:
-        success = httpx.Response(200, content=FIRST_CHUNK + b'{"response":" last","done":true}\n')
-    else:
-        success = httpx.Response(200, json={"response": "first last", "done": True})
-    requests = mock_ollama(httpx.Response(200, stream=broken), success)
-
+    broken = LlamaBody(httpx.ReadError("connection reset"))
+    success = (
+        httpx.Response(200, content=FIRST_CHUNK + LAST_CHUNK)
+        if streaming
+        else httpx.Response(200, json=SUCCESS)
+    )
+    requests = mock_llama(httpx.Response(200, stream=broken), success)
     response = await api.post(path, json=QUESTION)
-
     assert broken.closed
     assert len(requests) == 2
     assert all(json.loads(request.content)["stream"] is streaming for request in requests)
@@ -125,15 +134,13 @@ async def test_retries_transport_drop_before_answer(api, mock_ollama, path):
 
 
 @pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
-async def test_retries_disconnect_at_most_once(api, mock_ollama, path):
-    requests = mock_ollama(
+async def test_retries_disconnect_at_most_once(api, mock_llama, path):
+    requests = mock_llama(
         httpx.RemoteProtocolError("Server disconnected without sending a response."),
         httpx.RemoteProtocolError("Server disconnected without sending a response."),
     )
-
     response = await api.post(path, json=QUESTION)
-
-    check_error(response, path, 503, "Соединение с Ollama потеряно")
+    check_error(response, 503, "Соединение с llama-server потеряно")
     assert len(requests) == 2
 
 
@@ -141,47 +148,51 @@ async def test_retries_disconnect_at_most_once(api, mock_ollama, path):
 @pytest.mark.parametrize(
     ("reply", "status", "detail"),
     [
-        (httpx.ConnectError("refused"), 503, "Не удалось подключиться к Ollama"),
-        (httpx.ConnectTimeout("connect"), 504, "Истекло время подключения к Ollama"),
-        (httpx.ReadTimeout("idle"), 504, "Истекло время ожидания ответа Ollama"),
-        (httpx.Response(404), 502, "Ollama вернула HTTP 404"),
-        (httpx.Response(500), 502, "Ollama вернула HTTP 500"),
-        (httpx.RemoteProtocolError("illegal status line"), 502, "Некорректный ответ Ollama"),
-        (httpx.Response(200, content=b"{bad json}\n"), 502, "Некорректный JSON в ответе Ollama"),
-        (httpx.Response(200, content=b"[]\n"), 502, "Некорректный формат ответа Ollama"),
-        (
-            httpx.Response(200, content=b'{"error":"private backend details"}\n'),
-            502,
-            "Ollama сообщила об ошибке генерации",
-        ),
+        (httpx.ConnectError("refused"), 503, "Не удалось подключиться к llama-server"),
+        (httpx.ConnectTimeout("connect"), 504, "Истекло время ожидания llama-server"),
+        (httpx.ReadTimeout("idle"), 504, "Истекло время ожидания llama-server"),
+        (httpx.Response(503), 503, "llama-server временно недоступен или занят"),
+        (httpx.Response(404), 502, "llama-server вернул HTTP 404"),
+        (httpx.RemoteProtocolError("illegal status line"), 502, "Некорректный ответ llama-server"),
+        (httpx.Response(200, content=b"{bad json}\n"), 502, "Некорректный JSON от llama-server"),
+        (httpx.Response(200, content=b"[]\n"), 502, "Некорректный ответ llama-server"),
+        (httpx.Response(200, content=b'{"error":"private details"}\n'), 502, "Некорректный ответ llama-server"),
     ],
 )
-async def test_other_ollama_failures_do_not_retry(api, mock_ollama, path, reply, status, detail):
-    requests = mock_ollama(reply)
-
+async def test_other_llama_failures_do_not_retry(api, mock_llama, path, reply, status, detail):
+    requests = mock_llama(reply)
     response = await api.post(path, json=QUESTION)
-
-    check_error(response, path, status, detail)
+    check_error(response, status, detail)
     assert len(requests) == 1
 
 
 @pytest.mark.parametrize(
     ("tail", "detail"),
     [
-        (httpx.ReadError("connection reset"), "Соединение с Ollama потеряно"),
-        (httpx.ReadTimeout("idle"), "Истекло время ожидания ответа Ollama"),
-        (b'{"error":"model stopped"}\n', "Ollama сообщила об ошибке генерации"),
-        (b'{"response":15,"done":false}\n', "Некорректный формат ответа Ollama"),
-        (b"", "Поток Ollama завершился без подтверждения окончания"),
+        (httpx.ReadError("connection reset"), "Соединение с llama-server потеряно"),
+        (httpx.ReadTimeout("idle"), "Истекло время ожидания llama-server"),
+        (b'data: {"error":"model stopped"}\n\n', "Некорректный ответ llama-server"),
+        (
+            b'data: {"choices":[{"delta":{"content":15},"finish_reason":null}]}\n\n',
+            "Некорректный текст в потоке llama-server",
+        ),
+        (b"", "Поток llama-server оборвался без [DONE]"),
         (RuntimeError("private implementation details"), "Не удалось завершить поток ответа"),
     ],
 )
-async def test_partial_stream_ends_with_error_without_retry(api, mock_ollama, tail, detail):
-    body = OllamaBody(FIRST_CHUNK, tail)
-    requests = mock_ollama(httpx.Response(200, stream=body))
-
+async def test_partial_stream_ends_with_error_without_retry(api, mock_llama, tail, detail):
+    body = LlamaBody(FIRST_CHUNK, tail)
+    requests = mock_llama(httpx.Response(200, stream=body))
     response = await api.post("/ask/stream", json=QUESTION)
-
     assert read_events(response) == [("token", {"text": "first"}), ("error", {"detail": detail})]
     assert len(requests) == 1
     assert body.closed
+
+
+async def test_usage_is_read_from_stream(api, mock_llama):
+    mock_llama(httpx.Response(200, content=FIRST_CHUNK + LAST_CHUNK))
+    usage = llm_client.GenerationUsage()
+    result = [part async for part in llm_client.stream_answer("Question", usage=usage)]
+    assert result == ["first", " last"]
+    assert usage.prompt_tokens == 32
+    assert usage.completion_tokens == 5
