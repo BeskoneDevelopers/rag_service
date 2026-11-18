@@ -160,6 +160,14 @@ async def test_retries_disconnect_at_most_once(api, mock_llama, path):
     ],
 )
 async def test_other_llama_failures_do_not_retry(api, mock_llama, path, reply, status, detail):
+    if path.endswith("/stream") and isinstance(reply, httpx.Response):
+        raw = reply.content
+        if raw == b"{bad json}\n":
+            reply = httpx.Response(200, content=b"data: {bad json}\n\n")
+        elif raw == b"[]\n":
+            reply = httpx.Response(200, content=b"data: []\n\n")
+        elif raw.startswith(b'{"error":'):
+            reply = httpx.Response(200, content=b'data: {"error":"private details"}\n\n')
     requests = mock_llama(reply)
     response = await api.post(path, json=QUESTION)
     check_error(response, status, detail)
