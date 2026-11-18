@@ -1,0 +1,87 @@
+services:
+  web:
+    build: .
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    volumes:
+      - "./app:/app/app"
+      - "documents_data:/app/uploads"
+      - "./alembic:/app/alembic"
+
+    environment:
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+
+    env_file:
+      - .env
+
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+
+  db:
+    image: pgvector/pgvector:0.8.7-pg17
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    ports:
+      - "127.0.0.1:5433:5432"
+
+    volumes:
+      - "postgres_data:/var/lib/postgresql/data"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+
+  redis:
+    image: redis:8
+
+    volumes:
+      - "redis_data:/data"
+
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+
+
+  worker:
+    build: .
+
+    command: celery -A app.celery_app:celery_app worker --loglevel=info --concurrency=1
+
+    volumes:
+      - "./app:/app/app"
+      - "documents_data:/app/uploads"
+
+    env_file:
+      - .env
+
+    environment:
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  documents_data:
