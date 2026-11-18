@@ -13,20 +13,34 @@ from app.worker_db import sessionlocal
 logger = get_task_logger(__name__)
 
 
-@celery_app.task()
+@celery_app.task(acks_late=True, reject_on_worker_lost=True)
 def process_document(document_id: int):
     with sessionlocal() as session:
         document = session.get(Document, document_id, with_for_update=True)
 
         if document is None:
             raise ValueError(f"Документ {document_id} не найден")
-        if document.status in {"processing", "completed"}:
+        if document.status == "completed":
+            return {"processed": document_id}
+
+        # Expose "processing" to GET /documents/{id} before expensive indexing.
+        # A redelivered task must also be allowed to resume a processing document.
+        document.status = "processing"
+        session.commit()
+
+        # Lock the row for the whole indexing transaction. After a worker crash
+        # PostgreSQL releases it, so Celery can safely redeliver the same task.
+        # A duplicate that waited for the first worker sees "completed" and exits.
+        document = session.get(
+            Document, document_id, with_for_update=True, populate_existing=True
+        )
+        if document is None:
+            raise ValueError(f"Документ {document_id} не найден")
+        if document.status in {"completed", "failed"}:
             return {"processed": document_id}
 
         try:
             filepath = document.file_path
-            document.status = "processing"
-            session.commit()
             blocks = parser_document(filepath)
             chunking = chunk_blocks(blocks)
 

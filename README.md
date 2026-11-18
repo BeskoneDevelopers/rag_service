@@ -132,7 +132,7 @@ CSV содержит колонки `Enterprise Name`, `Query`, `Supporting Fact
 
 ```sh
 docker compose cp ./rag_benchmark.csv worker:/tmp/rag_benchmark.csv
-docker compose exec -T -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 worker \
+docker compose exec -T worker \
   python -m scripts.evaluate_retrieval \
   --benchmark /tmp/rag_benchmark.csv --seed 42 --questions-per-company 20
 ```
@@ -167,7 +167,7 @@ docker compose exec -T web python -m scripts.measure_ttft --warmup --company 'ZX
 - Запустить обе GGUF-модели на реальном компьютере и проверить подключение из Docker.
 - Заново проиндексировать все 236 PDF и измерить время обработки, Hit@5 и порог.
 - Повторить TTFT для 2/3/5 чанков, каждый замер с новым вопросом.
-- Проверить восстановление незавершённых задач при падении worker.
+- Проверить восстановление незавершённых задач при настоящем падении worker (логика повторной доставки покрыта тестами, но не проверялась с реальным Redis).
 - Добавить в PR реальный JSON `/ask`, запись SSE и актуальную таблицу измерений.
 
 Подготовка к ответам ментору: [docs/razbor.md](docs/razbor.md).

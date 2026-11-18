@@ -101,3 +101,45 @@ def test_repeated_celery_delivery_skips_completed_document(monkeypatch):
 
     assert tasks.process_document.run(123) == {"processed": 123}
     parse.assert_not_called()
+
+
+def test_redelivered_processing_document_can_finish(monkeypatch):
+    """The first worker died after recording processing, before committing chunks."""
+    document = SimpleNamespace(id=123, status="processing", file_path="notes.md", company="tenant-a")
+    session = Mock()
+    session.get.return_value = document
+    monkeypatch.setattr(tasks, "sessionlocal", lambda: nullcontext(session))
+    monkeypatch.setattr(
+        tasks,
+        "parser_document",
+        Mock(return_value=[{"text": "hello", "page_number": None, "section": "intro"}]),
+    )
+    monkeypatch.setattr(tasks, "chunk_blocks", lambda blocks: blocks)
+    monkeypatch.setattr(tasks, "embed_texts", lambda texts: [[0.1] * 1024])
+
+    assert tasks.process_document.run(123) == {"processed": 123}
+
+    assert document.status == "completed"
+    assert session.commit.call_count == 2
+    assert session.get.call_count == 2
+    assert session.get.call_args.kwargs["populate_existing"] is True
+    session.add.assert_called_once()
+
+
+def test_redelivery_after_previous_commit_skips_indexing(monkeypatch):
+    document = SimpleNamespace(id=123, status="processing", file_path="notes.md")
+    completed = SimpleNamespace(id=123, status="completed")
+    session = Mock()
+    session.get.side_effect = [document, completed]
+    monkeypatch.setattr(tasks, "sessionlocal", lambda: nullcontext(session))
+    parse = Mock(side_effect=AssertionError("Already indexed by first worker"))
+    monkeypatch.setattr(tasks, "parser_document", parse)
+
+    assert tasks.process_document.run(123) == {"processed": 123}
+    parse.assert_not_called()
+    assert session.commit.call_count == 1
+
+
+def test_indexing_task_is_redelivered_when_worker_dies():
+    assert tasks.process_document.acks_late is True
+    assert tasks.process_document.reject_on_worker_lost is True
