@@ -5,9 +5,9 @@ FastAPI принимает PDF, DOCX и Markdown, индексирует их в
 ## Архитектура
 
 1. `POST /documents` сохраняет файл в общий Docker-том, считает SHA-256 и публикует задачу Celery. PostgreSQL гарантирует уникальность пары `company + content_hash`, в том числе при параллельной загрузке.
-2. Celery разбирает документ, делит текст на чанки, считает векторы `BAAI/bge-m3` и записывает их в PostgreSQL. У документа есть статусы `pending`, `processing`, `completed` и `failed`. В API статус можно проверить по ID.
+2. Celery разбирает документ, делит текст на чанки, получает векторы от отдельного `llama-server` с `bge-m3 Q4_K_M` и записывает их в PostgreSQL. У документа есть статусы `pending`, `processing`, `completed` и `failed`. В API статус можно проверить по ID.
 3. `/ask` и `/ask/stream` передают поиск worker. pgvector выбирает ближайшие чанки компании по косинусному расстоянию через HNSW. Чанки ниже порога отсекаются до построения контекста.
-4. FastAPI передаёт контекст локальной Ollama с `qwen3:1.7b`. Redis Lock разрешает одну генерацию для обоих маршрутов. Обычный ответ содержит `answer` и `sources`. Потоковый ответ отдаёт `token` и завершается событием `sources` или `error`.
+4. FastAPI передаёт контекст локальному `llama-server` с `Qwen3.5-2B Q4_K_M`. Redis Lock разрешает одну генерацию для обоих маршрутов. Обычный ответ содержит `answer` и `sources`. Потоковый ответ отдаёт `token` и завершается событием `sources` или `error`.
 
 Celery нужен, чтобы загрузка файла не ждала парсинга, расчёта embedding и записи всех чанков. Поиск также выполняется в worker, поэтому API не загружает embedding-модель. Redis хранит очередь, результаты поиска и ключ блокировки генерации.
 
@@ -19,7 +19,7 @@ Celery нужен, чтобы загрузка файла не ждала пар
 
 ## Запуск
 
-Понадобятся Docker с Compose v2, GNU Make для команды `make up` и Ollama на хосте с локальной моделью `qwen3:1.7b`. Для тестов вне Docker нужен Python 3.14.
+Понадобятся Docker с Compose v2, GNU Make для команды `make up`, Python 3.14 для локальных тестов и два запущенных `llama-server` вне Docker.
 
 При первом запуске скопируйте `.env.example` в `.env` и заполните переменные. Для Compose адрес базы в URL — `db:5432`. `JWT_SECRET` держите в локальном `.env`. Значение можно сгенерировать командой `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 
@@ -32,7 +32,8 @@ Celery нужен, чтобы загрузка файла не ждала пар
 | `JWT_SECRET` | Ключ подписи JWT (HS256) |
 | `CELERY_BROKER_URL` | Очередь Celery и Redis Lock. По умолчанию `redis://redis:6379/0` |
 | `CELERY_RESULT_BACKEND` | Результаты задач. По умолчанию `redis://redis:6379/1` |
-| `OLLAMA_URL` | URL генерации на хосте. Для Docker Desktop `http://host.docker.internal:11434/api/generate` |
+| `LLM_CHAT_URL`, `LLM_MODEL`, `LLM_TIMEOUT_SECONDS` | URL генерации через `llama-server`, имя модели и таймаут |
+| `EMBEDDINGS_URL`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_BATCH_SIZE`, `EMBEDDINGS_TIMEOUT_SECONDS` | URL embedding-сервера, имя модели, размер batch и таймаут |
 
 `make up` собирает и запускает сервисы, затем применяет миграции Alembic. Эти же команды можно выполнить в PowerShell.
 
@@ -42,7 +43,7 @@ docker compose exec -T web alembic upgrade head
 curl http://localhost:8000/health
 ```
 
-Откройте Swagger по адресу [localhost:8000/docs](http://localhost:8000/docs). На Linux для Ollama укажите адрес хоста, доступный из контейнера. При первом расчёте embedding worker использует том `model_cache` для `BAAI/bge-m3`. Для запуска без доступа к сети заранее нужен заполненный кэш.
+Откройте Swagger по адресу [localhost:8000/docs](http://localhost:8000/docs). На Linux для llama-server укажите адрес хоста, доступный из контейнера. Embedding-модель работает вне Docker по HTTP. Кэш `sentence-transformers` больше не используется.
 
 ### Примеры запросов
 
@@ -78,7 +79,24 @@ make lint
 make test
 ```
 
-В PowerShell используйте `python -m ruff check .` и `python -m pytest -q`. Тесты работают без БД, Redis, Celery worker и Ollama. Подмены проверяют запросы к ним. `conftest.py` запрещает загрузку embedding-модели. GitHub Actions выполняет Ruff и pytest для push и pull request.
+В PowerShell используйте `python -m ruff check .` и `python -m pytest -q`. Тесты работают без БД, Redis, Celery worker и llama-server. Подмены проверяют запросы к ним. `conftest.py` запрещает загрузку embedding-модели. GitHub Actions выполняет Ruff и pytest для push и pull request.
+
+## Запуск llama.cpp на компьютере
+
+Скачайте из ModelScope [Qwen3.5-2B Q4_K_M](https://www.modelscope.cn/models/unsloth/Qwen3.5-2B-GGUF) и [bge-m3 Q4_K_M](https://www.modelscope.cn/models/gpustack/bge-m3-GGUF). Установите `llama-server` из [llama.cpp](https://github.com/ggml-org/llama.cpp/releases). Запускайте процессы в двух разных терминалах PowerShell:
+
+```powershell
+llama-server -m "C:\models\Qwen3.5-2B-Q4_K_M.gguf" -ngl 99 -c 8192 -np 1 --reasoning off --alias qwen3.5-2b --host 0.0.0.0 --port 8081
+llama-server -m "C:\models\bge-m3-Q4_K_M.gguf" -ngl 99 --embeddings --pooling cls --alias bge-m3 --host 0.0.0.0 --port 8082
+```
+
+Укажите реальные пути к файлам. Адрес из Docker Desktop — `host.docker.internal`; оба процесса должны быть доступны контейнерам по портам 8081/8082. На видеокарте с 4 GB VRAM оба процесса могут не помещаться одновременно: уменьшите `-ngl` и следите за RAM. Не открывайте незапароленные сервисы в публичную сеть.
+
+**Внимание:** при смене embedding-backend старые и новые векторы нельзя хранить в одном индексе, даже если оба имеют размерность 1024. Сохраните старую БД для отката и создайте отдельную чистую БД/том для повторной индексации 236 PDF; повторите оценку порога и Hit@5.
+
+### Почему Celery вместо BackgroundTasks
+
+`BackgroundTasks` выполняется внутри процесса API; его завершение может прервать работу, а тяжёлая индексация будет расходовать ресурсы API. Celery выполняет задачи отдельным worker и ставит их в очередь Redis. При этом для надёжного восстановления после аварийного завершения worker требуется подтверждение задач после обработки и механизм возврата документов, зависших в `processing`: в текущем проекте это ещё предстоит проверить.
 
 ## Benchmark retrieval
 
@@ -95,7 +113,7 @@ docker compose exec -T -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 worker \
   --benchmark /tmp/rag_benchmark.csv --seed 42 --questions-per-company 20
 ```
 
-Результат повторной проверки с кэшем `BAAI/bge-m3` и существующим индексом — **76/78 (97,4%)** с порогом и без него. Из 80 вопросов у двух не оказалось эталонного PDF в индексе, поэтому знаменатель — 78. Все 25 проверок вне темы отклонены при 0.45. Это результат указанной выборки.
+Исторический результат на `sentence-transformers/BAAI/bge-m3` до перехода на GGUF с существующим индексом — **76/78 (97,4%)** с порогом и без него. Из 80 вопросов у двух не оказалось эталонного PDF в индексе, поэтому знаменатель — 78. Все 25 проверок вне темы отклонены при 0.45. Это результат указанной выборки.
 
 SHA-256 использованного CSV — `58be4e8ebe96147ab63b159b3166357ad905989023956038ed563f9b88c2d24e`. Исходный CSV и документы нужны для повтора этого результата.
 
@@ -108,9 +126,9 @@ docker compose exec -T web python -m scripts.measure_ttft --warmup --company 'ZX
   --question 'Why might ZX Bank consider Phuentsholing an important location for establishing a bank branch?'
 ```
 
-Скрипт проходит `top_k=2/3/5` для каждого вопроса. `ttft_ms` включает поиск через Celery, построение промпта и ожидание первого фрагмента текста. `llm_ttft_ms` начинается перед вызовом Ollama. Оба замера выполняются внутри приложения без HTTP-доставки SSE клиенту. Число входных и выходных токенов берётся из `prompt_eval_count` и `eval_count` Ollama. `--warmup` исключает из отчёта один предварительный запрос. См. [результаты прогона](benchmarks/ttft_ollama.csv) и [формат ответа Ollama](https://docs.ollama.com/api/generate).
+Скрипт проходит `top_k=2/3/5` для каждого вопроса. `ttft_ms` включает поиск через Celery, построение промпта и ожидание первого фрагмента текста. `llm_ttft_ms` начинается перед вызовом llama-server. Оба замера выполняются внутри приложения без HTTP-доставки SSE клиенту. Число входных и выходных токенов берётся из `usage.prompt_tokens` и `usage.completion_tokens` OpenAI-совместимого ответа llama-server. `--warmup` исключает из отчёта один предварительный запрос. См. [результаты прогона](benchmarks/ttft_ollama.csv) и [описание API llama-server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
 
-Один прогон после прогрева на `qwen3:1.7b`, по три вопроса на значение `top_k`.
+Исторический прогон на `qwen3:1.7b` до перехода на llama.cpp (по три вопроса на значение `top_k`). Для сдачи нужны новые замеры на Qwen3.5-2B, каждый раз с новым вопросом.
 
 | `top_k` | Медиана `ttft_ms` | Медиана `llm_ttft_ms` | Входные токены | Выходные токены |
 | ---: | ---: | ---: | ---: | ---: |
@@ -120,12 +138,12 @@ docker compose exec -T web python -m scripts.measure_ttft --warmup --company 'ZX
 
 Время PostgreSQL и Celery менялось между запросами. По трём замерам нельзя выбрать самый быстрый `top_k` для всего корпуса.
 
-## Переход на llama.cpp для задания ментора
+## Оставшиеся проверки перед PR
 
-Текущий запуск использует Ollama и `sentence-transformers`. Для сдачи по требованиям ментора нужны два локальных процесса `llama-server` на хосте и файлы `Qwen3.5-2B-GGUF Q4_K_M` и `bge-m3-GGUF Q4_K_M` из ModelScope.
+- Запустить обе GGUF-модели на реальном компьютере и проверить подключение из Docker.
+- Заново проиндексировать все 236 PDF и измерить время обработки, Hit@5 и порог.
+- Повторить TTFT для 2/3/5 чанков, каждый замер с новым вопросом.
+- Проверить восстановление незавершённых задач при падении worker.
+- Добавить в PR реальный JSON `/ask`, запись SSE и актуальную таблицу измерений.
 
-1. В списках файлов ModelScope подтверждены `Qwen3.5-2B-Q4_K_M.gguf` и `bge-m3-Q4_K_M.gguf`. Перед запуском зафиксировать ревизию и SHA-256 фактически полученных файлов. [Qwen на ModelScope](https://www.modelscope.cn/models/unsloth/Qwen3.5-2B-GGUF), [bge-m3 на ModelScope](https://www.modelscope.cn/models/gpustack/bge-m3-GGUF).
-2. После получения файлов запустить Qwen с `llama-server -m <QWEN.gguf> --host <host-ip> --port 8081 --parallel 1`, а bge-m3 с `llama-server -m <BGE.gguf> --host <host-ip> --port 8082 --embeddings --pooling cls`. Подставить адрес хоста, доступный из сети контейнеров. Подключить `/v1/chat/completions` в `llm_client.py` и `/v1/embeddings` в `embeddings.py`. Публичные маршруты FastAPI и Redis Lock можно сохранить. [Документация llama-server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
-3. Проверить порядок результатов batch, pooling и размерность 1024. Построить отдельный индекс на новом backend для документов и запросов. Затем повторить Hit@5, проверку порога, ссылки и TTFT. После сравнения можно переключить сервис на новый индекс, сохранив исходный для отката.
-
-Краткий разбор для подготовки к проверке находится в [docs/razbor.md](docs/razbor.md).
+Подготовка к ответам ментору: [docs/razbor.md](docs/razbor.md).
