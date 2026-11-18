@@ -98,6 +98,30 @@ llama-server -m "C:\models\bge-m3-Q4_K_M.gguf" -ngl 99 --embeddings --pooling cl
 
 `BackgroundTasks` выполняется внутри процесса API; его завершение может прервать работу, а тяжёлая индексация будет расходовать ресурсы API. Celery выполняет задачи отдельным worker и ставит их в очередь Redis. При этом для надёжного восстановления после аварийного завершения worker требуется подтверждение задач после обработки и механизм возврата документов, зависших в `processing`: в текущем проекте это ещё предстоит проверить.
 
+### Проверка моделей и загрузка корпуса
+
+После запуска двух `llama-server`, из корня проекта:
+
+```powershell
+docker compose up -d --build
+docker compose exec -T web alembic upgrade head
+docker compose exec -T web python -m scripts.check_models
+```
+
+`scripts.check_models` проверяет `/health`, отправляет два текста на embedding-сервер и один вопрос генератору. Убедитесь, что вектор имеет размерность 1024. Это реальный сетевой тест; CI использует заглушки и не проверяет модели.
+
+Скачайте `RAG-Multi-Corpus` в отдельную папку на компьютере. Например, при расположении в `C:\data\RAG-Multi-Corpus` скрипт можно запустить в отдельном контейнере, смонтировав только папку `datasets`:
+
+```powershell
+docker compose run --rm -v "C:\data\RAG-Multi-Corpus\datasets:/corpus:ro" web python -m scripts.import_pdfs /corpus --url http://web:8000 --dry-run
+docker compose run --rm -v "C:\data\RAG-Multi-Corpus\datasets:/corpus:ro" web python -m scripts.import_pdfs /corpus --url http://web:8000 --wait --timeout 7200 --report /app/uploads/corpus_import.json
+```
+
+Замените путь `C:\data\RAG-Multi-Corpus\datasets` своим. `--dry-run` только считает PDF и проверяет структуру: всего 236 файлов по пяти компаниям. Обычный запуск отправляет `POST /documents` с JWT компании, ждёт завершения индексации и сохраняет JSON-отчёт в Docker-томе `documents_data` (`/app/uploads/corpus_import.json`). Повторная отправка того же файла в той же компании идемпотентна. **Перед реальной загрузкой обязательно используйте новый пустой PostgreSQL-индекс, не затрагивая старый том.**
+
+
+При оценке времени ~1,5 минуты из задания учитывайте, что обработка 236 документов зависит от выбранного GPU/CPU-offload и скорости отдельного embedding-сервера. Записывайте фактические значения, не предполагайте выполнение норматива заранее.
+
 ## Benchmark retrieval
 
 Понадобятся проиндексированные PDF из RAG-Multi-Corpus и CSV вопросов. При создании индекса передавайте имя компании из CSV в JWT и `POST /documents`. Для PDF из группы CloudWay используйте `CloudWay-24`, как в контрольных запросах скрипта. Дождитесь `completed` для загруженных документов. [PDF корпуса](https://github.com/udayallu/RAG-Multi-Corpus/tree/39071af3f4dd25e59f5c59a6f9b6e8e99cd643b3/datasets), [CSV вопросов](https://raw.githubusercontent.com/udayallu/RAG-Multi-Corpus/39071af3f4dd25e59f5c59a6f9b6e8e99cd643b3/bechmark/bechmark-agentic-references/Dataset%20categories%20-%20queries.csv).
