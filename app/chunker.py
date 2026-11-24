@@ -26,10 +26,13 @@ def chunk_blocks(blocks: list[dict]) -> list[dict]:
     result_block = []
 
     for part in blocks:
-        chunk = chunk_text(part["text"])
+        # Reserve room for the heading on every chunk, including very long sections.
+        # Keep the full heading in metadata; cap only its embedding-text prefix.
+        prefix = f"{part['section'][:200]}\n\n" if part["section"] else ""
+        chunk = chunk_text(part["text"], chunk_size=1000 - len(prefix))
         for part_chunk in chunk:
             block_chunk = {
-                "text": part_chunk,
+                "text": prefix + part_chunk,
                 "page_number": part["page_number"],
                 "section": part["section"],
             }

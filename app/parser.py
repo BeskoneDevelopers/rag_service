@@ -20,18 +20,27 @@ def parser_docx(file_path: str):
     doc = DocxDocument(file_path)
     block_text = []
     section_name = None
+    paragraphs = []
 
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
 
         if paragraph.style.name in ("Heading 1", "Heading 2"):
+            if paragraphs:
+                block_text.append(
+                    {"text": "\n\n".join(paragraphs), "page_number": None, "section": section_name}
+                )
+                paragraphs = []
             section_name = text
             continue
 
-        block = {"text": text, "page_number": None, "section": section_name}
-
         if text:
-            block_text.append(block)
+            paragraphs.append(text)
+
+    if paragraphs:
+        block_text.append(
+            {"text": "\n\n".join(paragraphs), "page_number": None, "section": section_name}
+        )
 
     return block_text
 
@@ -55,9 +64,15 @@ def parser_md(file_path: str):
     tokens = MarkdownIt().parse(doc)
     block_text = []
     section_name = None
+    paragraphs = []
 
     for i, token in enumerate(tokens):
         if token.type == "heading_open":
+            if paragraphs:
+                block_text.append(
+                    {"text": "\n\n".join(paragraphs), "page_number": None, "section": section_name}
+                )
+                paragraphs = []
             section_name = tokens[i + 1].content
             continue
 
@@ -67,11 +82,9 @@ def parser_md(file_path: str):
             text = token.content.strip()
 
             if text:
-                block_text.append(
-                    {
-                        "text": text,
-                        "page_number": None,
-                        "section": section_name,
-                    }
-                )
+                paragraphs.append(text)
+    if paragraphs:
+        block_text.append(
+            {"text": "\n\n".join(paragraphs), "page_number": None, "section": section_name}
+        )
     return block_text

@@ -1,4 +1,5 @@
 from celery.utils.log import get_task_logger
+from sqlalchemy import delete
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.celery_app import celery_app
@@ -52,6 +53,8 @@ def process_document(document_id: int):
             if len(chunking) != len(vectors):
                 raise ValueError("Количество чанков не совпадает с векторами")
 
+            # Replace any previous chunks in the same transaction as completed.
+            session.execute(delete(Chunk).where(Chunk.document_id == document_id))
             for index, (chunk, vector) in enumerate(zip(chunking, vectors, strict=True)):
                 res = Chunk(
                     document_id=document.id,
@@ -69,8 +72,12 @@ def process_document(document_id: int):
         except Exception:
             try:
                 session.rollback()
-                document.status = "failed"
-                session.commit()
+                document = session.get(
+                    Document, document_id, with_for_update=True, populate_existing=True
+                )
+                if document is not None and document.status != "completed":
+                    document.status = "failed"
+                    session.commit()
             except SQLAlchemyError:
                 logger.exception("Could not record processing failure for document %s", document_id)
             raise

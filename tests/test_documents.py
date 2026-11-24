@@ -105,7 +105,9 @@ def test_repeated_celery_delivery_skips_completed_document(monkeypatch):
 
 def test_redelivered_processing_document_can_finish(monkeypatch):
     """The first worker died after recording processing, before committing chunks."""
-    document = SimpleNamespace(id=123, status="processing", file_path="notes.md", company="tenant-a")
+    document = SimpleNamespace(
+        id=123, status="processing", file_path="notes.md", company="tenant-a"
+    )
     session = Mock()
     session.get.return_value = document
     monkeypatch.setattr(tasks, "sessionlocal", lambda: nullcontext(session))
@@ -143,3 +145,40 @@ def test_redelivery_after_previous_commit_skips_indexing(monkeypatch):
 def test_indexing_task_is_redelivered_when_worker_dies():
     assert tasks.process_document.acks_late is True
     assert tasks.process_document.reject_on_worker_lost is True
+
+
+@pytest.mark.parametrize("status", ["pending", "processing", "failed"])
+def test_redelivery_replaces_chunks_in_completion_transaction(monkeypatch, status):
+    document = SimpleNamespace(id=123, company="tenant-a", status=status, file_path="notes.md")
+    session = Mock()
+    session.get.return_value = document
+    monkeypatch.setattr(tasks, "sessionlocal", lambda: nullcontext(session))
+    monkeypatch.setattr(
+        tasks,
+        "parser_document",
+        Mock(return_value=[{"text": "Fact.", "page_number": None, "section": "Heading"}]),
+    )
+    embed = Mock(return_value=[[0.1] * 1024])
+    monkeypatch.setattr(tasks, "embed_texts", embed)
+    assert tasks.process_document.run(123) == {"processed": 123}
+    embed.assert_called_once_with(["Heading\n\nFact."])
+    assert document.status == "completed"
+    assert session.commit.call_count == 2
+    deletion = session.execute.call_args.args[0]
+    assert "DELETE FROM chunk" in str(deletion)
+    assert 123 in deletion.compile().params.values()
+    chunk = session.add.call_args.args[0]
+    assert (chunk.document_id, chunk.chunk_index, chunk.section) == (123, 0, "Heading")
+    assert session.get.call_args.kwargs["with_for_update"] is True
+
+
+def test_indexing_failure_does_not_overwrite_concurrent_completion(monkeypatch):
+    document = SimpleNamespace(id=123, status="pending", file_path="bad.md")
+    completed = SimpleNamespace(id=123, status="completed")
+    session = Mock()
+    session.get.side_effect = [document, document, completed]
+    monkeypatch.setattr(tasks, "sessionlocal", lambda: nullcontext(session))
+    monkeypatch.setattr(tasks, "parser_document", Mock(side_effect=ValueError("bad")))
+    with pytest.raises(ValueError):
+        tasks.process_document.run(123)
+    assert completed.status == "completed"
