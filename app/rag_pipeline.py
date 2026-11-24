@@ -6,6 +6,7 @@ from kombu.exceptions import OperationalError
 from redis.exceptions import RedisError
 
 from app.celery_app import celery_app
+from app.embeddings import EmbeddingServiceError
 from app.llm_client import LLMServiceError, generate_answer
 from app.llm_lock import llm_generation_lock
 from app.prompts import build_prompt, has_invalid_citation
@@ -30,6 +31,8 @@ async def retrieve_context(company: str, question: str, top_k: int = 5) -> dict:
         return await asyncio.to_thread(task.get, timeout=120)
     except CeleryTimeoutError as exc:
         raise RetrievalError(504, "Истекло время поиска документов") from exc
+    except EmbeddingServiceError as exc:
+        raise RetrievalError(503, "Embedding-сервис временно недоступен") from exc
     except Exception as exc:
         # Celery can wrap Redis result-backend connection failures in RuntimeError.
         if isinstance(exc, (OperationalError, RedisError)) or isinstance(exc.__cause__, RedisError):

@@ -1,8 +1,8 @@
-import os
-
 import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
+
+from app.config import settings
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
@@ -15,7 +15,7 @@ def decode_token(token: str) -> dict:
     try:
         payload = jwt.decode(
             token,
-            key=os.environ["JWT_SECRET"],
+            key=settings.jwt_secret.get_secret_value(),
             algorithms=["HS256"],
             options={"require": ["sub", "company", "exp"]},
         )

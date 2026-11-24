@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 import jwt
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.auth import get_current_user
+from app.config import settings
 from app.llm_client import LLMServiceError, LLMTimeoutError, LLMUnavailableError
 from app.main import app
 from app.routers.documents import get_session
@@ -52,7 +54,7 @@ def test_ask_forbidden_company():
 
 
 def test_ask_invalid_signature(monkeypatch):
-    monkeypatch.setenv("JWT_SECRET", secrets.token_urlsafe(32))
+    monkeypatch.setattr(settings, "jwt_secret", SecretStr(secrets.token_urlsafe(32)))
 
     token = jwt.encode(
         {
@@ -81,7 +83,7 @@ def test_ask_invalid_signature(monkeypatch):
 @pytest.mark.parametrize("expired", [False, True])
 def test_signed_token_enforces_company_and_expiry(monkeypatch, path, expired):
     secret = secrets.token_urlsafe(32)
-    monkeypatch.setenv("JWT_SECRET", secret)
+    monkeypatch.setattr(settings, "jwt_secret", SecretStr(secret))
     token = jwt.encode(
         {
             "sub": "test_user",

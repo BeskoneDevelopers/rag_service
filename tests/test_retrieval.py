@@ -11,6 +11,7 @@ from kombu.exceptions import OperationalError
 from sqlalchemy.dialects import postgresql
 
 from app import rag_pipeline, retrieval, tasks
+from app.embeddings import EmbeddingServiceError
 from app.routers import ask
 
 pytestmark = pytest.mark.anyio
@@ -191,6 +192,7 @@ async def test_answer_citations_are_checked_against_sources(
     [
         (OperationalError("broker down"), 503),
         (CeleryTimeoutError("wait"), 504),
+        (EmbeddingServiceError("embedding unavailable"), 503),
         (ValueError("internal worker details"), 502),
     ],
 )
@@ -200,7 +202,7 @@ async def test_celery_failure_becomes_http_error_before_sse(
     task = Mock()
     task.get.side_effect = failure
     send = Mock(return_value=task)
-    if status == 503:
+    if isinstance(failure, OperationalError):
         send.side_effect = failure
     monkeypatch.setattr(rag_pipeline.celery_app, "send_task", send)
 
@@ -210,3 +212,10 @@ async def test_celery_failure_becomes_http_error_before_sse(
     assert response.status_code == status
     assert "detail" in response.json()
     assert str(failure) not in response.text
+
+
+def test_embedding_error_survives_celery_json_result_serialization():
+    backend = rag_pipeline.celery_app.backend
+    serialized = backend.prepare_exception(EmbeddingServiceError("temporarily unavailable"))
+    restored = backend.exception_to_python(json.loads(json.dumps(serialized)))
+    assert isinstance(restored, EmbeddingServiceError)
