@@ -6,7 +6,6 @@ which must already be available to the process. It never prints the secret.
 
 import argparse
 import json
-import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -99,6 +98,9 @@ def wait_for_index(
             )
             response.raise_for_status()
             status = response.json()["status"]
+            for record in records:
+                if record["company"] == company and record["id"] == doc_id:
+                    record["status"] = status
             if status == "failed":
                 raise RuntimeError(f"Indexing failed for {company} document ID={doc_id}")
             if status == "completed":
@@ -131,9 +133,9 @@ def main() -> None:
         if args.dry_run:
             return
 
-        secret = os.environ.get("JWT_SECRET")
-        if not secret:
-            raise ValueError("JWT_SECRET must be set in the importing process")
+        from app.config import settings
+
+        secret = settings.jwt_secret.get_secret_value()
         with httpx.Client(base_url=args.url, timeout=120) as client:
             records, upload_seconds = upload_all(client, pdfs, secret)
             print(f"Uploaded in {upload_seconds:.1f}s")

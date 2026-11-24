@@ -78,7 +78,7 @@ def load_questions(path: Path, seed: int = 42, questions_per_company: int = 20):
     return questions
 
 
-def evaluate(path: Path, seed: int, questions_per_company: int):
+def evaluate(path: Path, seed: int, questions_per_company: int, report_path: Path | None = None):
     questions = load_questions(path, seed, questions_per_company)
     with path.open("rb") as file:
         digest = hashlib.file_digest(file, "sha256").hexdigest()
@@ -221,16 +221,35 @@ def evaluate(path: Path, seed: int, questions_per_company: int):
         print(f"Expected: {sorted(item['expected_available'])}")
         print(f"Found: {sorted(item['found'])}")
 
+    if report_path:
+        report = {
+            "csv_sha256": digest,
+            "seed": seed,
+            "questions_per_company": questions_per_company,
+            "similarity_threshold": SIMILARITY_THRESHOLD,
+            "reference_questions": len(valid),
+            "missing_reference": missing_reference,
+            "hits5": hits,
+            "hits5_filtered": filtered_hits,
+            "results": [
+                {k: sorted(v) if isinstance(v, set) else v for k, v in item.items()}
+                for item in results
+            ],
+        }
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate retrieval on an indexed RAG dataset")
     parser.add_argument("--benchmark", type=Path, default=Path("/tmp/rag_benchmark.csv"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--questions-per-company", type=int, default=20)
+    parser.add_argument("--report", type=Path, help="Save actual per-question retrieval results")
     args = parser.parse_args()
     if args.questions_per_company < 1:
         parser.error("--questions-per-company must be positive")
     try:
-        evaluate(args.benchmark, args.seed, args.questions_per_company)
+        evaluate(args.benchmark, args.seed, args.questions_per_company, args.report)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

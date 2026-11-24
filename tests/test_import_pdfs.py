@@ -32,7 +32,9 @@ def test_local_import_uploads_documents_with_correct_company(tmp_path):
         "status": "pending",
         "duplicate": False,
     }
-    results, elapsed = upload_all(client, [("ZX Bank", Path(path))], "test-secret")
+    results, elapsed = upload_all(
+        client, [("ZX Bank", Path(path))], "test-secret-with-32-characters-minimum"
+    )
     assert results[0]["company"] == "ZX Bank"
     assert results[0]["id"] == 42
     assert elapsed >= 0
