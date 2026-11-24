@@ -1,11 +1,13 @@
 """OpenAI-compatible llama.cpp client; httpx is replaceable by tests."""
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
+from anyio import CancelScope, move_on_after
 
 
 @dataclass
@@ -43,11 +45,13 @@ def _llama_url() -> httpx.URL:
         raise LLMUnavailableError("Некорректный адрес llama-server") from exc
 
 
-def _payload(prompt: str, *, stream: bool) -> dict:
+def _payload(prompt: str, *, stream: bool, cache_prompt: bool = True) -> dict:
     payload = {
         "model": model_name(),
         "messages": [{"role": "user", "content": prompt}],
         "stream": stream,
+        "max_tokens": _settings().llm_max_tokens,
+        "cache_prompt": cache_prompt,
     }
     if stream:
         payload["stream_options"] = {"include_usage": True}
@@ -105,6 +109,8 @@ def _get_choice(data: dict, *, stream: bool) -> dict | None:
 def _check_finish_reason(reason: object) -> bool:
     if reason is None:
         return False
+    if reason == "length":
+        raise LLMServiceError("Достигнут лимит токенов: ответ не завершён")
     if reason != "stop":
         raise LLMServiceError("Генерация не завершилась штатно")
     return True
@@ -123,15 +129,27 @@ def _set_usage(data: dict, usage: GenerationUsage | None) -> None:
 @asynccontextmanager
 async def _request_llama(url: httpx.URL, payload: dict) -> AsyncIterator[httpx.Response]:
     timeout = httpx.Timeout(_settings().llm_timeout_seconds, connect=5.0)
-    async with (
-        httpx.AsyncClient(timeout=timeout) as client,
-        client.stream("POST", url, json=payload) as response,
-    ):
+    stack = AsyncExitStack()
+    try:
+        client = await stack.enter_async_context(httpx.AsyncClient(timeout=timeout))
+        response = await stack.enter_async_context(client.stream("POST", url, json=payload))
         response.raise_for_status()
         yield response
+    finally:
+        # Cancellation must still close the upstream response before releasing the lock.
+        with CancelScope(shield=True), move_on_after(5):
+            await stack.aclose()
 
 
 async def generate_answer(prompt: str) -> str:
+    try:
+        async with asyncio.timeout(_settings().llm_generation_timeout_seconds):
+            return await _generate_answer(prompt)
+    except TimeoutError as exc:
+        raise LLMTimeoutError("Превышен абсолютный лимит генерации") from exc
+
+
+async def _generate_answer(prompt: str) -> str:
     url = _llama_url()
     payload = _payload(prompt, stream=False)
     for retry_allowed in (True, False):
@@ -154,16 +172,26 @@ async def generate_answer(prompt: str) -> str:
 
 
 async def stream_answer(
-    prompt: str, *, usage: GenerationUsage | None = None
+    prompt: str, *, usage: GenerationUsage | None = None, cache_prompt: bool = True
 ) -> AsyncGenerator[str, None]:
     url = _llama_url()
-    payload = _payload(prompt, stream=True)
+    payload = _payload(prompt, stream=True, cache_prompt=cache_prompt)
     emitted_token = False
+    deadline = asyncio.get_running_loop().time() + _settings().llm_generation_timeout_seconds
     for retry_allowed in (True, False):
         try:
-            async with _request_llama(url, payload) as response:
+            async with AsyncExitStack() as stack:
+                async with asyncio.timeout_at(deadline):
+                    response = await stack.enter_async_context(_request_llama(url, payload))
                 finished = False
-                async for line in response.aiter_lines():
+                lines = response.aiter_lines()
+                while True:
+                    # Do not keep a cancellation scope open across an async-generator yield.
+                    async with asyncio.timeout_at(deadline):
+                        try:
+                            line = await anext(lines)
+                        except StopAsyncIteration:
+                            break
                     if not line.startswith("data:"):
                         continue
                     raw = line.removeprefix("data:").strip()
@@ -188,6 +216,8 @@ async def stream_answer(
                     if _check_finish_reason(choice.get("finish_reason")):
                         finished = True
                 raise LLMServiceError("Поток llama-server оборвался без [DONE]")
+        except TimeoutError as exc:
+            raise LLMTimeoutError("Превышен абсолютный лимит генерации") from exc
         except httpx.HTTPError as exc:
             disconnected = _connection_dropped(exc)
             if not (retry_allowed and disconnected and not emitted_token):

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from threading import Lock
@@ -13,12 +12,10 @@ from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from redis.exceptions import RedisError
 
-logger = logging.getLogger(__name__)
+from app.config import settings
+from app.llm_client import LLMTimeoutError
 
-REDIS_URL = os.getenv(
-    "CELERY_BROKER_URL",
-    "redis://redis:6379/0",
-)
+logger = logging.getLogger(__name__)
 
 LOCK_KEY = "rag:llm:generation"
 LOCK_TTL = 180
@@ -54,7 +51,9 @@ async def _lock_redis() -> AsyncIterator[Redis]:
     try:
         with fail_after(REDIS_TIMEOUT):
             # A retried SET NX can report contention after the first attempt succeeded.
-            async with Redis.from_url(REDIS_URL, retry=Retry(NoBackoff(), 0)) as redis:
+            async with Redis.from_url(
+                settings.celery_broker_url, retry=Retry(NoBackoff(), 0)
+            ) as redis:
                 yield redis
     except (RedisError, TimeoutError, ValueError) as exc:
         raise LLMLockUnavailableError("Сервис блокировок недоступен") from exc
@@ -112,16 +111,20 @@ async def llm_generation_lock() -> AsyncIterator[None]:
         if not acquired:
             raise LLMBusyError("Модель уже выполняет другой запрос")
 
-        # Base the deadline on the start of the Redis command and leave time to cancel Ollama.
-        with CancelScope(deadline=started + LOCK_TTL * 2 / 3) as generation:
-            heartbeat = asyncio.create_task(_keep_llm_lock(token, generation))
-            try:
-                await checkpoint()
-                yield
-            finally:
-                heartbeat.cancel()
-                with CancelScope(shield=True), suppress(asyncio.CancelledError):
-                    await heartbeat
+        # The absolute deadline is independent of the renewable Redis lease.
+        try:
+            with fail_after(settings.llm_generation_timeout_seconds):
+                with CancelScope(deadline=started + LOCK_TTL * 2 / 3) as generation:
+                    heartbeat = asyncio.create_task(_keep_llm_lock(token, generation))
+                    try:
+                        await checkpoint()
+                        yield
+                    finally:
+                        heartbeat.cancel()
+                        with CancelScope(shield=True), suppress(asyncio.CancelledError):
+                            await heartbeat
+        except TimeoutError as exc:
+            raise LLMTimeoutError("Превышен абсолютный лимит генерации") from exc
 
         if generation.cancel_called:
             raise LLMLockUnavailableError("Блокировка генерации потеряна")

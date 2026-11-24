@@ -50,6 +50,8 @@ def check_models(
                 "model": chat_model,
                 "messages": [{"role": "user", "content": "Reply with OK."}],
                 "stream": False,
+                "max_tokens": 32,
+                "cache_prompt": False,
             },
         )
         response.raise_for_status()

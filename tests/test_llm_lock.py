@@ -280,3 +280,83 @@ async def test_stream_disconnect_closes_generation(app, redis, monkeypatch, phas
         assert started.is_set()
     else:
         assert not started.is_set()
+
+
+@pytest.mark.parametrize("path", ["/ask", "/ask/stream"])
+async def test_absolute_deadline_releases_lock_and_allows_next_request(
+    app, redis, monkeypatch, path
+):
+    monkeypatch.setattr(llm_lock.settings, "llm_generation_timeout_seconds", 0.08)
+    closed = anyio.Event()
+
+    async def generate(prompt):
+        try:
+            await anyio.sleep_forever()
+        finally:
+            closed.set()
+
+    async def stream(prompt):
+        yield "Partial answer"
+        await generate(prompt)
+
+    monkeypatch.setattr(rag_pipeline, "generate_answer", generate)
+    monkeypatch.setattr(ask, "stream_answer", stream)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        with anyio.fail_after(2):
+            response = await client.post(path, json=QUESTION)
+        assert response.status_code == (200 if path.endswith("/stream") else 504)
+        if path.endswith("/stream"):
+            assert "event: error" in response.text and "event: sources" not in response.text
+        assert closed.is_set()
+        assert redis.owner() is None
+        monkeypatch.setattr(rag_pipeline, "generate_answer", AsyncMock(return_value="Answer"))
+        assert (await client.post("/ask", json=QUESTION)).status_code == 200
+    assert redis.owner() is None
+
+
+@pytest.mark.parametrize("phase", ["set", "generation"])
+async def test_nonstream_disconnect_releases_lock(app, redis, monkeypatch, phase):
+    started = anyio.Event()
+    closed = anyio.Event()
+    if phase == "set":
+        redis.set_result = anyio.Event()
+
+    async def generate(prompt):
+        started.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            assert redis.owner() is not None
+            closed.set()
+
+    monkeypatch.setattr(rag_pipeline, "generate_answer", generate)
+    body = json.dumps(QUESTION).encode()
+
+    async def receive():
+        nonlocal body
+        if body:
+            message = {"type": "http.request", "body": body}
+            body = b""
+            return message
+        if phase == "set":
+            await redis.set_started.wait()
+            redis.set_result.set()
+        else:
+            await started.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        pass
+
+    scope = {
+        "type": "http",
+        "asgi": {"spec_version": "2.4"},
+        "path": "/ask",
+        "method": "POST",
+        "headers": [(b"content-type", b"application/json")],
+        "query_string": b"",
+    }
+    with anyio.fail_after(2):
+        await app(scope, receive, send)
+    assert redis.owner() is None
+    assert closed.is_set() == (phase == "generation")
